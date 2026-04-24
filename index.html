@@ -1271,11 +1271,11 @@ function renderEnemyBoard() {
 }
 
 function renderRosters() {
-  renderRoster('player-roster', state.playerBoard);
-  renderRoster('enemy-roster', state.enemyBoard);
+  renderRoster('player-roster', state.playerBoard, { revealDamage: true });
+  renderRoster('enemy-roster', state.enemyBoard, { revealDamage: false });
 }
 
-function renderRoster(id, board) {
+function renderRoster(id, board, { revealDamage } = { revealDamage: true }) {
   const el = document.getElementById(id);
   el.innerHTML = '';
   for (const ship of board.ships) {
@@ -1288,9 +1288,12 @@ function renderRoster(id, board) {
 
     const pips = document.createElement('div');
     pips.className = 'ship-pips';
+    // For the enemy roster, per-ship hit progress is hidden until the ship
+    // is fully sunk so that individual hits don't identify which ship was struck.
+    const pipsDamaged = (revealDamage || isSunk) ? ship.hits.size : 0;
     for (let i = 0; i < ship.cells.length; i++) {
       const pip = document.createElement('div');
-      pip.className = 'pip' + (i < ship.hits.size ? ' damaged' : '');
+      pip.className = 'pip' + (i < pipsDamaged ? ' damaged' : '');
       pips.appendChild(pip);
     }
 
