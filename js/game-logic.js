@@ -358,6 +358,16 @@
   }
 
   /* ==========================================================
+     SINK ANNOUNCEMENTS
+     ========================================================== */
+  function getSinkAnnouncement(side, shipName) {
+    const name = shipName || 'ship';
+    if (side === 'player') return `You sank my ${name}!`;
+    if (side === 'enemy')  return `We've lost our ${name}!`;
+    return '';
+  }
+
+  /* ==========================================================
      EXPORTS
      ========================================================== */
   return {
@@ -385,6 +395,7 @@
     aiHuntTarget,
     aiProbabilityShot,
     aiUpdateAfterShot,
-    addNeighbors
+    addNeighbors,
+    getSinkAnnouncement
   };
 });
