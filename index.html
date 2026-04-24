@@ -1441,6 +1441,23 @@ function playNoise(duration = 0.3, gain = 0.15, filterFreq = 800) {
   noise.stop(ctx.currentTime + duration);
 }
 
+function speak(text) {
+  if (!state.soundOn) return;
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.0;
+    u.pitch = 1.0;
+    u.volume = 1.0;
+    u.lang = 'en-US';
+    window.speechSynthesis.speak(u);
+  } catch (e) { /* silent fallback */ }
+}
+
+function announceSink(side, shipName) {
+  speak(getSinkAnnouncement(side, shipName));
+}
+
 const sfx = {
   shoot: () => playTone({freq: 800, duration: 0.08, type: 'sawtooth', gain: 0.08, ramp: 200}),
   miss: () => {
@@ -1800,6 +1817,9 @@ document.getElementById('btn-reset').addEventListener('click', () => {
 document.getElementById('btn-sound').addEventListener('click', () => {
   state.soundOn = !state.soundOn;
   document.getElementById('btn-sound').textContent = state.soundOn ? '🔊 Sound: On' : '🔇 Sound: Off';
+  if (!state.soundOn && 'speechSynthesis' in window) {
+    try { window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
+  }
 });
 
 document.getElementById('btn-play-again').addEventListener('click', () => {
@@ -1939,7 +1959,10 @@ function useAirstrike(r, c) {
         hits++;
         spawnExplosion(enemyGridEl, rr, cc, 'hit');
         sfx.hit();
-        if (shot.sunk) sunkMsgs.push(shot.ship.name);
+        if (shot.sunk) {
+          sunkMsgs.push(shot.ship.name);
+          announceSink('player', shot.ship.name);
+        }
       } else {
         spawnExplosion(enemyGridEl, rr, cc, 'miss');
         sfx.miss();
@@ -2012,6 +2035,7 @@ function useCaptainGunner(r, c) {
         state.hitsMade++; hits++;
         spawnExplosion(enemyGridEl, rr, cc, 'hit');
         sfx.hit();
+        if (shot.sunk) announceSink('player', shot.ship.name);
       } else {
         spawnExplosion(enemyGridEl, rr, cc, 'miss');
         sfx.miss();
@@ -2091,7 +2115,11 @@ function playerShoot(r, c, advanceTurn = true, isSalvo = false) {
     if (shot.result === 'hit') {
       state.hitsMade++;
       spawnExplosion(enemyGridEl, r, c, 'hit');
-      if (shot.sunk) { sfx.sunk(); setStatus(`Direct hit! You sunk their ${shot.ship.name}!`); }
+      if (shot.sunk) {
+        sfx.sunk();
+        announceSink('player', shot.ship.name);
+        setStatus(`Direct hit! You sunk their ${shot.ship.name}!`);
+      }
       else { sfx.hit(); setStatus('A hit! Keep up the fire, Commander!'); }
     } else {
       spawnExplosion(enemyGridEl, r, c, 'miss');
@@ -2127,7 +2155,11 @@ function enemyTurn() {
       spawnExplosion(playerGridEl, r, c, 'hit');
       document.querySelectorAll('.board-panel')[0].classList.add('shake');
       setTimeout(() => document.querySelectorAll('.board-panel')[0].classList.remove('shake'), 400);
-      if (shot.sunk) { sfx.sunk(); setStatus(`⚠ Catastrophe! Your ${shot.ship.name} has been sunk!`); }
+      if (shot.sunk) {
+        sfx.sunk();
+        announceSink('enemy', shot.ship.name);
+        setStatus(`⚠ Catastrophe! Your ${shot.ship.name} has been sunk!`);
+      }
       else { sfx.hit(); setStatus('⚠ Enemy fire strikes true! We have been hit!'); }
     } else {
       spawnExplosion(playerGridEl, r, c, 'miss');

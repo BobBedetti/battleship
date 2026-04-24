@@ -28,7 +28,8 @@ const {
   aiHuntTarget,
   aiProbabilityShot,
   aiUpdateAfterShot,
-  addNeighbors
+  addNeighbors,
+  getSinkAnnouncement
 } = require('../js/game-logic.js');
 
 /* ============================================================
@@ -491,4 +492,27 @@ test('end-to-end: player can sink a full AI fleet on a 2×2 board', () => {
   assert.equal(hit2.result, 'hit');
   assert.equal(hit2.sunk, true);
   assert.equal(allShipsSunk(b), true);
+});
+
+/* ============================================================
+   Sink announcements
+   ============================================================ */
+test('getSinkAnnouncement: player-sinks-enemy uses classic phrasing', () => {
+  assert.equal(getSinkAnnouncement('player', 'Battleship'), 'You sank my Battleship!');
+  assert.equal(getSinkAnnouncement('player', 'Carrier'), 'You sank my Carrier!');
+});
+
+test('getSinkAnnouncement: enemy-sinks-player speaks from the crew POV', () => {
+  assert.equal(getSinkAnnouncement('enemy', 'Destroyer'), "We've lost our Destroyer!");
+  assert.equal(getSinkAnnouncement('enemy', 'Submarine'), "We've lost our Submarine!");
+});
+
+test('getSinkAnnouncement: unknown side returns empty string', () => {
+  assert.equal(getSinkAnnouncement('bogus', 'Cruiser'), '');
+  assert.equal(getSinkAnnouncement(undefined, 'Cruiser'), '');
+});
+
+test('getSinkAnnouncement: missing ship name falls back to generic "ship"', () => {
+  assert.equal(getSinkAnnouncement('player', ''), 'You sank my ship!');
+  assert.equal(getSinkAnnouncement('enemy', undefined), "We've lost our ship!");
 });
