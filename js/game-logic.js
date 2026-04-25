@@ -207,14 +207,16 @@
       mode: 'hunt',
       targetQueue: [],
       hitStack: [],
-      lastHit: null
+      lastHit: null,
+      firstHit: null,       // [r, c] of the hit that started the current chain
+      confirmedDir: null     // [dr, dc] once two collinear hits lock a direction
     };
   }
 
   function aiChooseShot(ai, board, allowDiag) {
     if (ai.difficulty === 'easy') return aiRandomShot(board);
     if (ai.difficulty === 'admiral') return aiProbabilityShot(ai, board, allowDiag);
-    return aiHuntTarget(ai, board);
+    return aiHuntTarget(ai, board, allowDiag);
   }
 
   function aiRandomShot(board) {
@@ -228,7 +230,7 @@
     return options[Math.floor(Math.random() * options.length)];
   }
 
-  function aiHuntTarget(ai, board) {
+  function aiHuntTarget(ai, board, allowDiag) {
     while (ai.targetQueue.length > 0) {
       const next = ai.targetQueue.shift();
       if (cellInBounds(board, next[0], next[1]) && !board.shotsTaken.has(`${next[0]},${next[1]}`)) {
@@ -236,12 +238,23 @@
       }
     }
 
-    // Target queue drained. If we still have stale hits from a partially-
-    // damaged (but not sunk) ship that we've given up on, drop them so a
-    // future hunt-phase hit isn't misinterpreted as part of the old chain.
-    if (ai.hitStack.length > 0) {
-      ai.hitStack = [];
-      ai.mode = 'hunt';
+    // Target queue drained while still tracking an unsunk ship.
+    if (ai.hitStack.length > 0 && ai.firstHit) {
+      // Try perpendicular directions from firstHit before giving up.
+      if (ai.confirmedDir) {
+        aiQueuePerpendicular(ai, allowDiag);
+        while (ai.targetQueue.length > 0) {
+          const next = ai.targetQueue.shift();
+          if (cellInBounds(board, next[0], next[1]) && !board.shotsTaken.has(`${next[0]},${next[1]}`)) {
+            return next;
+          }
+        }
+      }
+      // Perpendicular also exhausted (or no confirmed direction) — reset.
+      aiResetToHunt(ai);
+    } else if (ai.hitStack.length > 0) {
+      // Stale hits without firstHit (shouldn't normally happen) — clean up.
+      aiResetToHunt(ai);
     }
 
     // Checkerboard hunt
@@ -268,6 +281,22 @@
       if (cellInBounds(board, next[0], next[1]) && !board.shotsTaken.has(`${next[0]},${next[1]}`)) {
         return next;
       }
+    }
+
+    // Target queue drained while still tracking an unsunk ship.
+    if (ai.hitStack.length > 0 && ai.firstHit) {
+      if (ai.confirmedDir) {
+        aiQueuePerpendicular(ai, allowDiag);
+        while (ai.targetQueue.length > 0) {
+          const next = ai.targetQueue.shift();
+          if (cellInBounds(board, next[0], next[1]) && !board.shotsTaken.has(`${next[0]},${next[1]}`)) {
+            return next;
+          }
+        }
+      }
+      aiResetToHunt(ai);
+    } else if (ai.hitStack.length > 0) {
+      aiResetToHunt(ai);
     }
 
     const remainingShips = board.ships.filter(s => s.hits.size < s.cells.length);
@@ -323,30 +352,115 @@
 
   function aiUpdateAfterShot(ai, shot, allowDiag) {
     if (ai.difficulty === 'easy') return;
+
+    /* ---- Miss handling ---- */
+    if (shot.result === 'miss') {
+      if (ai.mode === 'target' && ai.confirmedDir && ai.targetQueue.length === 0) {
+        aiQueuePerpendicular(ai, allowDiag);
+      }
+      return;
+    }
+
     if (shot.result !== 'hit') return;
 
     ai.hitStack.push([shot.r, shot.c]);
+
+    /* ---- Sunk handling ---- */
     if (shot.sunk) {
-      ai.mode = 'hunt';
-      ai.targetQueue = [];
-      ai.hitStack = [];
+      const sunkCells = shot.ship
+        ? new Set(shot.ship.cells.map(([r, c]) => `${r},${c}`))
+        : null;
+      if (sunkCells) {
+        ai.hitStack = ai.hitStack.filter(([r, c]) => !sunkCells.has(`${r},${c}`));
+      } else {
+        ai.hitStack = [];
+      }
+
+      if (ai.hitStack.length > 0) {
+        // Leftover hits from an adjacent ship — keep targeting
+        ai.firstHit = ai.hitStack[0];
+        ai.confirmedDir = null;
+        ai.targetQueue = [];
+        ai.mode = 'target';
+        if (ai.hitStack.length >= 2) {
+          aiLockDirection(ai);
+        } else {
+          addNeighbors(ai, ai.firstHit[0], ai.firstHit[1], allowDiag);
+        }
+      } else {
+        aiResetToHunt(ai);
+      }
       return;
     }
+
+    /* ---- Hit (not sunk) ---- */
     ai.mode = 'target';
 
-    if (ai.hitStack.length >= 2) {
-      const [a, b] = [ai.hitStack[ai.hitStack.length - 2], ai.hitStack[ai.hitStack.length - 1]];
-      const dr = Math.sign(b[0] - a[0]), dc = Math.sign(b[1] - a[1]);
-      if (dr === 0 && dc === 0) {
-        addNeighbors(ai, shot.r, shot.c, allowDiag);
+    if (ai.hitStack.length === 1) {
+      ai.firstHit = [shot.r, shot.c];
+      ai.confirmedDir = null;
+      addNeighbors(ai, shot.r, shot.c, allowDiag);
+    } else {
+      aiLockDirection(ai);
+    }
+  }
+
+  function aiLockDirection(ai) {
+    const first = ai.firstHit;
+    const last = ai.hitStack[ai.hitStack.length - 1];
+    const dr = Math.sign(last[0] - first[0]);
+    const dc = Math.sign(last[1] - first[1]);
+    if (dr === 0 && dc === 0) return;
+
+    ai.confirmedDir = [dr, dc];
+
+    // Find the extreme endpoints of the hit chain along confirmedDir
+    let minProj = Infinity, maxProj = -Infinity;
+    let minHit, maxHit;
+    for (const h of ai.hitStack) {
+      const proj = h[0] * dr + h[1] * dc;
+      if (proj <= minProj) { minProj = proj; minHit = h; }
+      if (proj >= maxProj) { maxProj = proj; maxHit = h; }
+    }
+
+    ai.targetQueue = [
+      [maxHit[0] + dr, maxHit[1] + dc],   // forward
+      [minHit[0] - dr, minHit[1] - dc]    // backward
+    ];
+  }
+
+  function aiQueuePerpendicular(ai, allowDiag) {
+    if (!ai.firstHit) return;
+    const [r, c] = ai.firstHit;
+    const [dr, dc] = ai.confirmedDir || [0, 0];
+
+    ai.targetQueue = [];
+    ai.confirmedDir = null;
+
+    if (!allowDiag) {
+      if (dr === 0) {
+        // Was horizontal → try vertical
+        ai.targetQueue.push([r - 1, c], [r + 1, c]);
       } else {
-        const forward = [b[0] + dr, b[1] + dc];
-        const backward = [a[0] - dr, a[1] - dc];
-        ai.targetQueue = [forward, backward];
+        // Was vertical → try horizontal
+        ai.targetQueue.push([r, c - 1], [r, c + 1]);
       }
     } else {
-      addNeighbors(ai, shot.r, shot.c, allowDiag);
+      // Diagonal mode: try every direction except confirmed and its reverse
+      const allDirs = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[-1,1],[1,-1],[1,1]];
+      for (const [ddr, ddc] of allDirs) {
+        if ((ddr === dr && ddc === dc) || (ddr === -dr && ddc === -dc)) continue;
+        ai.targetQueue.push([r + ddr, c + ddc]);
+      }
     }
+  }
+
+  function aiResetToHunt(ai) {
+    ai.mode = 'hunt';
+    ai.targetQueue = [];
+    ai.hitStack = [];
+    ai.firstHit = null;
+    ai.confirmedDir = null;
   }
 
   function addNeighbors(ai, r, c, allowDiag) {
@@ -395,6 +509,9 @@
     aiHuntTarget,
     aiProbabilityShot,
     aiUpdateAfterShot,
+    aiLockDirection,
+    aiQueuePerpendicular,
+    aiResetToHunt,
     addNeighbors,
     getSinkAnnouncement
   };
