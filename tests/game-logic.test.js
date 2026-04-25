@@ -28,6 +28,9 @@ const {
   aiHuntTarget,
   aiProbabilityShot,
   aiUpdateAfterShot,
+  aiLockDirection,
+  aiQueuePerpendicular,
+  aiResetToHunt,
   addNeighbors,
   getSinkAnnouncement
 } = require('../js/game-logic.js');
@@ -377,14 +380,17 @@ test('aiUpdateAfterShot on second collinear hit locks onto the line', () => {
 
 test('aiUpdateAfterShot on sunk clears target/hit state', () => {
   const ai = makeAI('normal');
+  const ship = { cells: [[0, 0], [0, 1]], hits: new Set(['0,0', '0,1']) };
   aiUpdateAfterShot(ai, { result: 'hit', r: 0, c: 0, sunk: false }, false);
-  aiUpdateAfterShot(ai, { result: 'hit', r: 0, c: 1, sunk: true }, false);
+  aiUpdateAfterShot(ai, { result: 'hit', r: 0, c: 1, sunk: true, ship }, false);
   assert.equal(ai.mode, 'hunt');
   assert.equal(ai.targetQueue.length, 0);
   assert.equal(ai.hitStack.length, 0);
+  assert.equal(ai.firstHit, null);
+  assert.equal(ai.confirmedDir, null);
 });
 
-test('aiUpdateAfterShot ignores misses (no mode change, no queued neighbors)', () => {
+test('aiUpdateAfterShot ignores misses in hunt mode (no mode change)', () => {
   const ai = makeAI('normal');
   aiUpdateAfterShot(ai, { result: 'miss', r: 0, c: 0 }, false);
   assert.equal(ai.mode, 'hunt');
@@ -401,17 +407,13 @@ test('aiHuntTarget drains target queue and skips already-shot / out-of-bounds ce
   assert.deepEqual(pick, [0, 2], 'should skip the OOB and already-shot cells');
 });
 
-test('aiHuntTarget resets stale hit state when target queue is exhausted', () => {
-  // Regression: previously, if the AI accumulated hits on one ship but
-  // never sank it and all of its queued targets missed, the stale hits
-  // would poison a future hunt-mode hit (it would be "connected" to the
-  // old hits and the AI would waste shots on an unrelated line).
+test('aiHuntTarget resets stale hit state when target queue is exhausted (no firstHit)', () => {
   const b = makeBoard(4);
   const ai = makeAI('normal');
   ai.mode = 'target';
   ai.hitStack = [[0, 0]];
-  ai.targetQueue = []; // queue is drained
-  aiHuntTarget(ai, b);
+  ai.targetQueue = [];
+  aiHuntTarget(ai, b, false);
   assert.equal(ai.hitStack.length, 0, 'stale hit stack should be cleared');
   assert.equal(ai.mode, 'hunt');
 });
@@ -515,4 +517,244 @@ test('getSinkAnnouncement: unknown side returns empty string', () => {
 test('getSinkAnnouncement: missing ship name falls back to generic "ship"', () => {
   assert.equal(getSinkAnnouncement('player', ''), 'You sank my ship!');
   assert.equal(getSinkAnnouncement('enemy', undefined), "We've lost our ship!");
+});
+
+/* ============================================================
+   AI — improved targeting (BOB-8)
+   ============================================================ */
+
+test('makeAI initializes firstHit and confirmedDir to null', () => {
+  const ai = makeAI('normal');
+  assert.equal(ai.firstHit, null);
+  assert.equal(ai.confirmedDir, null);
+});
+
+test('aiUpdateAfterShot sets firstHit on initial hit', () => {
+  const ai = makeAI('normal');
+  aiUpdateAfterShot(ai, { result: 'hit', r: 5, c: 5, sunk: false }, false);
+  assert.deepEqual(ai.firstHit, [5, 5]);
+  assert.equal(ai.confirmedDir, null);
+});
+
+test('aiUpdateAfterShot sets confirmedDir on second collinear hit', () => {
+  const ai = makeAI('normal');
+  aiUpdateAfterShot(ai, { result: 'hit', r: 3, c: 3, sunk: false }, false);
+  aiUpdateAfterShot(ai, { result: 'hit', r: 3, c: 4, sunk: false }, false);
+  assert.deepEqual(ai.confirmedDir, [0, 1]);
+  assert.deepEqual(ai.firstHit, [3, 3]);
+});
+
+test('aiLockDirection computes forward/backward from hit chain endpoints', () => {
+  const ai = makeAI('normal');
+  ai.firstHit = [3, 3];
+  ai.hitStack = [[3, 3], [3, 4], [3, 5]];
+  aiLockDirection(ai);
+  assert.deepEqual(ai.confirmedDir, [0, 1]);
+  assert.deepEqual(ai.targetQueue, [[3, 6], [3, 2]]);
+});
+
+test('aiLockDirection handles backward endpoint correctly for 3+ hits', () => {
+  const ai = makeAI('normal');
+  ai.firstHit = [2, 5];
+  ai.hitStack = [[2, 5], [2, 6], [2, 7]];
+  aiLockDirection(ai);
+  assert.deepEqual(ai.targetQueue, [[2, 8], [2, 4]]);
+});
+
+test('miss in target mode with confirmedDir and empty queue triggers perpendicular', () => {
+  const ai = makeAI('normal');
+  ai.mode = 'target';
+  ai.firstHit = [3, 3];
+  ai.hitStack = [[3, 3], [3, 4]];
+  ai.confirmedDir = [0, 1];
+  ai.targetQueue = [];
+  aiUpdateAfterShot(ai, { result: 'miss', r: 3, c: 5 }, false);
+  // Perpendicular to horizontal = vertical neighbors of firstHit
+  assert.deepEqual(ai.targetQueue, [[2, 3], [4, 3]]);
+  assert.equal(ai.confirmedDir, null, 'confirmedDir should be cleared for re-detection');
+});
+
+test('miss in target mode without confirmedDir does not change queue', () => {
+  const ai = makeAI('normal');
+  ai.mode = 'target';
+  ai.firstHit = [3, 3];
+  ai.hitStack = [[3, 3]];
+  ai.confirmedDir = null;
+  ai.targetQueue = [[2, 3], [4, 3]];
+  aiUpdateAfterShot(ai, { result: 'miss', r: 3, c: 4 }, false);
+  assert.deepEqual(ai.targetQueue, [[2, 3], [4, 3]], 'queue unchanged without confirmedDir');
+});
+
+test('miss in target mode with confirmedDir but non-empty queue does not trigger perpendicular', () => {
+  const ai = makeAI('normal');
+  ai.mode = 'target';
+  ai.firstHit = [3, 3];
+  ai.hitStack = [[3, 3], [3, 4]];
+  ai.confirmedDir = [0, 1];
+  ai.targetQueue = [[3, 2]]; // backward still queued
+  aiUpdateAfterShot(ai, { result: 'miss', r: 3, c: 5 }, false);
+  assert.deepEqual(ai.targetQueue, [[3, 2]], 'backward should remain in queue');
+});
+
+test('aiQueuePerpendicular from horizontal direction queues vertical neighbors', () => {
+  const ai = makeAI('normal');
+  ai.firstHit = [5, 5];
+  ai.confirmedDir = [0, 1];
+  aiQueuePerpendicular(ai, false);
+  assert.deepEqual(ai.targetQueue, [[4, 5], [6, 5]]);
+  assert.equal(ai.confirmedDir, null);
+});
+
+test('aiQueuePerpendicular from vertical direction queues horizontal neighbors', () => {
+  const ai = makeAI('normal');
+  ai.firstHit = [5, 5];
+  ai.confirmedDir = [1, 0];
+  aiQueuePerpendicular(ai, false);
+  assert.deepEqual(ai.targetQueue, [[5, 4], [5, 6]]);
+});
+
+test('aiQueuePerpendicular with diagonals queues all non-axis directions', () => {
+  const ai = makeAI('normal');
+  ai.firstHit = [5, 5];
+  ai.confirmedDir = [1, 1]; // diag-down
+  aiQueuePerpendicular(ai, true);
+  // Should exclude [1,1] and [-1,-1], include the other 6 directions
+  assert.equal(ai.targetQueue.length, 6);
+  const keys = ai.targetQueue.map(([r, c]) => `${r},${c}`);
+  assert.ok(!keys.includes('6,6'), 'should not include forward direction');
+  assert.ok(!keys.includes('4,4'), 'should not include reverse direction');
+});
+
+test('aiResetToHunt clears all targeting state', () => {
+  const ai = makeAI('normal');
+  ai.mode = 'target';
+  ai.hitStack = [[1, 1]];
+  ai.firstHit = [1, 1];
+  ai.confirmedDir = [0, 1];
+  ai.targetQueue = [[1, 2]];
+  aiResetToHunt(ai);
+  assert.equal(ai.mode, 'hunt');
+  assert.equal(ai.hitStack.length, 0);
+  assert.equal(ai.firstHit, null);
+  assert.equal(ai.confirmedDir, null);
+  assert.equal(ai.targetQueue.length, 0);
+});
+
+test('aiHuntTarget tries perpendicular before resetting when queue drains with active firstHit', () => {
+  const b = makeBoard(5);
+  const ai = makeAI('normal');
+  ai.mode = 'target';
+  ai.hitStack = [[2, 2]];
+  ai.firstHit = [2, 2];
+  ai.confirmedDir = [0, 1];
+  ai.targetQueue = [];
+  // All horizontal neighbors already shot
+  processShot(b, 2, 1);
+  processShot(b, 2, 3);
+  const pick = aiHuntTarget(ai, b, false);
+  // Should try perpendicular: (1,2) or (3,2)
+  assert.ok(pick !== null);
+  const [r, c] = pick;
+  assert.equal(c, 2, 'perpendicular shot should be in same column as firstHit');
+  assert.ok(r === 1 || r === 3, 'perpendicular shot should be above or below firstHit');
+});
+
+test('sunk with adjacent ship hits keeps targeting the adjacent ship', () => {
+  const ai = makeAI('normal');
+  // Scenario: AI hit a 2-cell ship at (3,3)-(3,4) and accidentally hit
+  // an adjacent ship cell at (3,5) while following the line
+  aiUpdateAfterShot(ai, { result: 'hit', r: 3, c: 3, sunk: false }, false);
+  aiUpdateAfterShot(ai, { result: 'hit', r: 3, c: 4, sunk: false }, false);
+  aiUpdateAfterShot(ai, { result: 'hit', r: 3, c: 5, sunk: false }, false);
+
+  // Now the ship at (3,3)-(3,4) is sunk
+  const sunkShip = { cells: [[3, 3], [3, 4]], hits: new Set(['3,3', '3,4']) };
+  aiUpdateAfterShot(ai, { result: 'hit', r: 3, c: 6, sunk: true, ship: sunkShip }, false);
+
+  // Leftover hit at (3,5) should keep AI in target mode
+  assert.equal(ai.mode, 'target');
+  assert.equal(ai.hitStack.length, 2, 'should retain (3,5) and (3,6)');
+  assert.deepEqual(ai.firstHit, [3, 5]);
+  assert.ok(ai.targetQueue.length > 0, 'should have queued neighbors for remaining hit');
+});
+
+test('end-to-end: AI follows a line and sinks a horizontal ship', () => {
+  const b = makeBoard(6);
+  // Place a 4-cell ship at (2,1)-(2,4)
+  placeShip(b, shipDef('battleship', 4), 2, 1, 'horizontal');
+  const ai = makeAI('normal');
+
+  // Simulate: AI gets a hit at (2,2) from hunt mode
+  let shot = processShot(b, 2, 2);
+  aiUpdateAfterShot(ai, shot, false);
+  assert.equal(ai.mode, 'target');
+  assert.deepEqual(ai.firstHit, [2, 2]);
+
+  // AI explores neighbors. Simulate a miss at (1,2) (above)
+  shot = processShot(b, 1, 2);
+  aiUpdateAfterShot(ai, shot, false);
+
+  // AI tries (3,2) (below) — miss
+  shot = processShot(b, 3, 2);
+  aiUpdateAfterShot(ai, shot, false);
+
+  // AI tries (2,1) — hit! Direction locked to horizontal
+  shot = processShot(b, 2, 1);
+  aiUpdateAfterShot(ai, shot, false);
+  assert.deepEqual(ai.confirmedDir, [0, -1]);
+
+  // Forward = (2,0) — miss (no ship there)
+  shot = processShot(b, 2, 0);
+  aiUpdateAfterShot(ai, shot, false);
+
+  // Backward = (2,3) — hit!
+  shot = processShot(b, 2, 3);
+  aiUpdateAfterShot(ai, shot, false);
+
+  // Continue forward in new direction: (2,4) — hit! Ship sunk!
+  shot = processShot(b, 2, 4);
+  aiUpdateAfterShot(ai, shot, false);
+  assert.equal(shot.sunk, true);
+  assert.equal(ai.mode, 'hunt');
+  assert.equal(ai.hitStack.length, 0);
+});
+
+test('end-to-end: AI reverses direction after miss and completes sinking', () => {
+  const b = makeBoard(6);
+  // Ship at (3,2)-(3,4)
+  placeShip(b, shipDef('cruiser', 3), 3, 2, 'horizontal');
+  const ai = makeAI('normal');
+
+  // Hit at (3,3)
+  let shot = processShot(b, 3, 3);
+  aiUpdateAfterShot(ai, shot, false);
+
+  // Hit at (3,4) — direction locked: [0,1]
+  shot = processShot(b, 3, 4);
+  aiUpdateAfterShot(ai, shot, false);
+  assert.deepEqual(ai.confirmedDir, [0, 1]);
+
+  // Forward (3,5) — miss! Queue still has backward (3,2)
+  shot = processShot(b, 3, 5);
+  aiUpdateAfterShot(ai, shot, false);
+  assert.equal(ai.mode, 'target');
+
+  // Backward (3,2) — hit! Ship sunk!
+  shot = processShot(b, 3, 2);
+  aiUpdateAfterShot(ai, shot, false);
+  assert.equal(shot.sunk, true);
+  assert.equal(ai.mode, 'hunt');
+});
+
+test('admiral AI clears stale hitStack when target queue drains', () => {
+  const b = makeBoard(5);
+  placeShip(b, shipDef('cruiser', 3), 0, 0, 'horizontal');
+  const ai = makeAI('admiral');
+  ai.mode = 'target';
+  ai.hitStack = [[2, 2]];
+  ai.firstHit = null; // no firstHit → will reset
+  ai.targetQueue = [];
+  aiProbabilityShot(ai, b, false);
+  assert.equal(ai.hitStack.length, 0, 'stale hit stack should be cleared');
+  assert.equal(ai.mode, 'hunt');
 });
